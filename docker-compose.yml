@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  ghostauth:
+    build: .
+    ports:
+      - "8669:8000"
+    volumes:
+      - .:/app
+    environment:
+      - ANISETTE_SERVER_URL=http://anisette:6969
+    depends_on:
+      - anisette
+
+  anisette:
+    image: dadoum/anisette-v3-server
+    ports:
+      - "6969:6969"
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      update_config:
+        order: start-first
