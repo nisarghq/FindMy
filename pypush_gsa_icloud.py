@@ -36,6 +36,11 @@ def icloud_login_mobileme(username='', password='', second_factor='sms'):
         password = getpass('Password: ')
 
     g = gsa_authenticate(username, password, second_factor)
+    # np: We want to return the 2sv challenge response to the endpoint so we can call another endpoint to
+    # solve the challenge
+    if "2sv_challenge_response" in g:
+        return g
+    
     pet = g["t"]["com.apple.gs.idms.pet"]["token"]
     adsid = g["adsid"]
 
@@ -108,9 +113,23 @@ def gsa_authenticate(username, password, second_factor='sms'):
             if isinstance(v, bytes):
                 spd[k] = base64.b64encode(v).decode()
         if second_factor == 'sms':
-            sms_second_factor(spd["adsid"], spd["GsIdmsToken"])
+            # np: Returning a response here which can be used to call sms_second_factor and gsa_authenticate later.
+            trigger_sms_second_factor(spd["adsid"], spd["GsIdmsToken"])
+            return {
+                "2sv_challenge_response": "sms_second_factor_required",
+                "adsid": spd["adsid"],
+                "GsIdmsToken": spd["GsIdmsToken"]
+            }
+            # np: Old code here sms_second_factor(spd["adsid"], spd["GsIdmsToken"])
         elif second_factor == 'trusted_device':
-            trusted_second_factor(spd["adsid"], spd["GsIdmsToken"])
+            # np: Same with before we will call trusted_second_factor and gsa_authenticate later
+            trigger_trusted_second_factor(spd["adsid"], spd["GsIdmsToken"])
+            return {
+                "2sv_challenge_response": "trusted_second_factor_required",
+                "adsid": spd["adsid"],
+                "GsIdmsToken": spd["GsIdmsToken"]
+            }
+            # np: Old code here trusted_second_factor(spd["adsid"], spd["GsIdmsToken"])
         return gsa_authenticate(username, password)
     elif "au" in r["Status"]:
         print(f"Unknown auth value {r['Status']['au']}")
@@ -224,48 +243,7 @@ def decrypt_cbc(usr, data):
     padder = padding.PKCS7(128).unpadder()
     return padder.update(data) + padder.finalize()
 
-def trusted_second_factor(dsid, idms_token):
-    identity_token = base64.b64encode((dsid + ":" + idms_token).encode()).decode()
-
-    headers = {
-        "Content-Type": "text/x-xml-plist",
-        "User-Agent": "Xcode",
-        "Accept": "text/x-xml-plist",
-        "Accept-Language": "en-us",
-        "X-Apple-Identity-Token": identity_token,
-        "X-Apple-App-Info": "com.apple.gs.xcode.auth",
-        "X-Xcode-Version": "11.2 (11B41)",
-        "X-Mme-Client-Info": '<MacBookPro18,3> <Mac OS X;13.4.1;22F8> <com.apple.AOSKit/282 (com.apple.dt.Xcode/3594.4.19)>'
-    }
-
-    headers.update(generate_anisette_headers())
-
-    # This will trigger the 2FA prompt on trusted devices
-    # We don't care about the response, it's just some HTML with a form for entering the code
-    # Easier to just use a text prompt
-    requests.get(
-        "https://gsa.apple.com/auth/verify/trusteddevice",
-        headers=headers,
-        verify=False,
-        timeout=10,
-    )
-
-    # Prompt for the 2FA code. It's just a string like '123456', no dashes or spaces
-    code = getpass("Enter 2FA code: ")
-    headers["security-code"] = code
-
-    # Send the 2FA code to Apple
-    resp = requests.get(
-        "https://gsa.apple.com/grandslam/GsService2/validate",
-        headers=headers,
-        verify=False,
-        timeout=10,
-    )
-    if resp.ok:
-        print("2FA successful")
-
-
-def sms_second_factor(dsid, idms_token):
+def _sms_headers(dsid, idms_token):
     identity_token = base64.b64encode((dsid + ":" + idms_token).encode()).decode()
 
     # TODO: Actually do this request to get user prompt data
@@ -283,6 +261,57 @@ def sms_second_factor(dsid, idms_token):
     }
 
     headers.update(generate_anisette_headers())
+    return headers
+
+def _trusted_factor_headers(dsid, idms_token):
+    identity_token = base64.b64encode((dsid + ":" + idms_token).encode()).decode()
+
+    headers = {
+        "Content-Type": "text/x-xml-plist",
+        "User-Agent": "Xcode",
+        "Accept": "text/x-xml-plist",
+        "Accept-Language": "en-us",
+        "X-Apple-Identity-Token": identity_token,
+        "X-Apple-App-Info": "com.apple.gs.xcode.auth",
+        "X-Xcode-Version": "11.2 (11B41)",
+        "X-Mme-Client-Info": '<MacBookPro18,3> <Mac OS X;13.4.1;22F8> <com.apple.AOSKit/282 (com.apple.dt.Xcode/3594.4.19)>'
+    }
+
+    headers.update(generate_anisette_headers())
+    return headers
+
+def trigger_trusted_second_factor(dsid, idms_token):
+    headers = _trusted_factor_headers(dsid, idms_token)
+
+    # This will trigger the 2FA prompt on trusted devices
+    # We don't care about the response, it's just some HTML with a form for entering the code
+    # Easier to just use a text prompt
+    resp = requests.get(
+        "https://gsa.apple.com/auth/verify/trusteddevice",
+        headers=headers,
+        verify=False,
+        timeout=10,
+    )
+    if not resp.ok:
+        raise Exception("Failed to send 2FA code")
+
+def send_trusted_second_factor(dsid, idms_token, code):
+    headers = _trusted_factor_headers(dsid, idms_token)
+    headers["security-code"] = code
+    # Send the 2FA code to Apple
+    resp = requests.get(
+        "https://gsa.apple.com/grandslam/GsService2/validate",
+        headers=headers,
+        verify=False,
+        timeout=10,
+    )
+    return {
+        "success": resp.ok
+    }
+
+
+def trigger_sms_second_factor(dsid, idms_token):
+    headers = _sms_headers(dsid, idms_token)
 
     # TODO: Actually get the correct id, probably in the above GET
     body = {"phoneNumber":{"id":1},"mode":"sms"}
@@ -290,18 +319,21 @@ def sms_second_factor(dsid, idms_token):
     # This will send the 2FA code to the user's phone over SMS
     # We don't care about the response, it's just some HTML with a form for entering the code
     # Easier to just use a text prompt
-    t = requests.put(
+    resp = requests.put(
         "https://gsa.apple.com/auth/verify/phone/",
         json=body,
         headers=headers,
         verify=False,
         timeout=5
     )
+    if not resp.ok:
+        raise Exception("Failed to send 2FA code")
+
+def send_sms_second_factor(dsid, idms_token, code):
+    headers = _sms_headers(dsid, idms_token)
+    
     # Prompt for the 2FA code. It's just a string like '123456', no dashes or spaces
-    code = input("Enter 2FA code: ")
-
-    body['securityCode'] = {'code': code}
-
+    body = {"phoneNumber":{"id":1},"mode":"sms","securityCode": {'code': code}}
     # Send the 2FA code to Apple
     resp = requests.post(
         "https://gsa.apple.com/auth/verify/phone/securitycode",
@@ -310,5 +342,6 @@ def sms_second_factor(dsid, idms_token):
         verify=False,
         timeout=5,
     )
-    if resp.ok:
-        print("2FA successful")
+    return {
+        "success": resp.ok
+    }
