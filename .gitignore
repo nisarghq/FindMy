@@ -2,3 +2,4 @@
 *.pem
 .DS_Store
 auth.json
+__pycache__
