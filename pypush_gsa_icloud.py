@@ -27,7 +27,7 @@ srp.no_username_in_x()
 import urllib3
 urllib3.disable_warnings()
 
-ANISETTE_URL = 'http://localhost:6969'  # https://github.com/Dadoum/anisette-v3-server
+ANISETTE_URL = 'http://anisette:6969'  # https://github.com/Dadoum/anisette-v3-server
 
 def icloud_login_mobileme(username='', password='', second_factor='sms'):
     if not username:
